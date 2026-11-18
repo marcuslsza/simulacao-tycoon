@@ -14,8 +14,13 @@
 //   ./park --visitors 20000 --queue heap,array    # escolhe as estruturas
 //   ./park --demo --visitors 1500 --minutes 120 --frame-every 10
 //   ./park --demo --delay-ms 400 --clear          # "animação" no terminal
+//   ./park --capacity-range 20,60 --ride-range 2,10 --balk-wait 30
+//   ./park --attr-range 10,40 --w-dist 3 --fatigue-per-ride 0.25 --rest-gain 40
+//   ./park --repeat-penalty 15      # repetir a mesma atração só "custa" 15 min de fila
+//   ./park --repeat-penalty 0       # sem variedade (como na versão anterior)
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -63,7 +68,39 @@ Options parse(int argc, char** argv) {
         else if (a == "--rides") o.cfg.rides = std::stoull(next());
         else if (a == "--minutes") o.cfg.minutes = std::stod(next());
         else if (a == "--seed") o.cfg.seed = std::stoull(next());
-        else if (a == "--capacity") o.cfg.capacity = std::stoull(next());
+        else if (a == "--capacity") {  // todas as atrações com a mesma capacidade
+            o.cfg.capacity_min = o.cfg.capacity_max = std::stoull(next());
+        } else if (a == "--capacity-range") {  // MIN,MAX sorteado por atração (fixo depois)
+            const auto p = split(next(), ',');
+            if (p.size() != 2) { std::fprintf(stderr, "use --capacity-range MIN,MAX\n"); std::exit(2); }
+            o.cfg.capacity_min = std::stoull(p[0]);
+            o.cfg.capacity_max = std::stoull(p[1]);
+        } else if (a == "--ride-range") {  // MIN,MAX minutos, sorteado por atração (fixo depois)
+            const auto p = split(next(), ',');
+            if (p.size() != 2) { std::fprintf(stderr, "use --ride-range MIN,MAX\n"); std::exit(2); }
+            o.cfg.ride_min = std::stod(p[0]);
+            o.cfg.ride_max = std::stod(p[1]);
+        }
+        else if (a == "--load-time") o.cfg.load_time = std::stod(next());
+        else if (a == "--balk-wait") o.cfg.balk_wait = std::stod(next());
+        else if (a == "--attr-range") {  // atratividade fixa por atração, sorteada em MIN,MAX
+            const auto p = split(next(), ',');
+            if (p.size() != 2) { std::fprintf(stderr, "use --attr-range MIN,MAX\n"); std::exit(2); }
+            o.cfg.attr_min = std::stod(p[0]);
+            o.cfg.attr_max = std::stod(p[1]);
+        }
+        else if (a == "--w-wait") o.cfg.w_wait = std::stod(next());
+        else if (a == "--w-dist") o.cfg.w_dist = std::stod(next());
+        else if (a == "--temperature") o.cfg.temperature = std::stod(next());
+        else if (a == "--consider") o.cfg.consider = std::stoull(next());
+        else if (a == "--fatigue-per-ride") o.cfg.fatigue_per_ride = std::stod(next());
+        else if (a == "--fatigue-tau") o.cfg.fatigue_tau = std::stod(next());
+        else if (a == "--fatigue-sens") o.cfg.fatigue_sens = std::stod(next());
+        else if (a == "--rest-base") o.cfg.rest_base = std::stod(next());
+        else if (a == "--rest-gain") o.cfg.rest_gain = std::stod(next());
+        else if (a == "--rest-mean") o.cfg.rest_mean = std::stod(next());
+        else if (a == "--rest-tau") o.cfg.rest_tau = std::stod(next());
+        else if (a == "--repeat-penalty") o.cfg.repeat_penalty = std::stod(next());  // inf, 0 ou N
         else if (a == "--incident-mean") o.cfg.incident_mean = std::stod(next());
         else if (a == "--patience") o.cfg.patience_mean = std::stod(next());
         else if (a == "--queue") o.queues = split(next(), ',');
@@ -110,16 +147,17 @@ void render(const pq::ParkSim<Q>& s, const char* qname, bool clear) {
     for (std::size_t r = 0; r < R; ++r) maxq = std::max(maxq, s.line_length(r));
     for (std::size_t r = 0; r < R; ++r) {
         const std::size_t bar = s.line_length(r) * 30 / maxq;
-        std::printf(" %c %-30s %5zu na fila, %2zu no passeio%s", static_cast<char>('A' + r),
-                    std::string(bar, '#').c_str(), s.line_length(r), s.riding(r),
+        std::printf(" %c %-30s %5zu na fila, %2zu no passeio (cap %zu, %.1f min, atrat. %.0f)%s",
+                    static_cast<char>('A' + r), std::string(bar, '#').c_str(), s.line_length(r),
+                    s.riding(r), s.capacity(r), s.ride_duration(r), s.attractiveness(r),
                     s.broken(r) ? "" : "\n");
         if (s.broken(r)) std::printf("  [QUEBRADA, ~%.1f min]\n", s.repair_left(r));
     }
     const pq::ParkStats st = s.stats();
-    std::printf(" embarques %llu | desistencias %llu | recusaram a fila %llu | espera media %.1f min | quebras %llu\n\n",
+    std::printf(" embarques %llu | desistencias %llu | recusaram a fila %llu | descansos %llu | espera media %.1f min | quebras %llu\n\n",
                 static_cast<unsigned long long>(st.boarded), static_cast<unsigned long long>(st.giveups),
-                static_cast<unsigned long long>(st.balks), st.mean_wait,
-                static_cast<unsigned long long>(st.incidents));
+                static_cast<unsigned long long>(st.balks), static_cast<unsigned long long>(st.rests),
+                st.mean_wait, static_cast<unsigned long long>(st.incidents));
     std::fflush(stdout);
 }
 
@@ -168,11 +206,20 @@ Row bench_one(const Options& o) {
     return row;
 }
 
+std::string repeat_label(double p) {
+    if (std::isinf(p)) return "nunca em sequencia";
+    if (p == 0.0) return "livre";
+    char b[48];
+    std::snprintf(b, sizeof b, "penalidade %.1f min", p);
+    return b;
+}
+
 bool same_history(const pq::ParkStats& a, const pq::ParkStats& b) {
     return a.checksum == b.checksum && a.events == b.events && a.n_push == b.n_push &&
            a.n_cancel == b.n_cancel && a.n_resched == b.n_resched && a.boarded == b.boarded &&
            a.giveups == b.giveups && a.balks == b.balks && a.completed == b.completed &&
-           a.incidents == b.incidents && a.mean_wait == b.mean_wait &&
+           a.incidents == b.incidents && a.mean_wait == b.mean_wait && a.rests == b.rests &&
+           a.repeats == b.repeats && a.mean_fatigue == b.mean_fatigue &&
            a.peak_pending == b.peak_pending && a.peak_line == b.peak_line;
 }
 
@@ -211,14 +258,28 @@ int main(int argc, char** argv) {
         std::printf("Parque: %zu visitantes, %zu atracoes, %.0f min simulados, semente %llu\n",
                     o.cfg.visitors, o.cfg.rides, o.cfg.minutes,
                     static_cast<unsigned long long>(o.cfg.seed));
+        std::printf("Atracoes: capacidade %zu a %zu por partida | passeios de %.1f a %.1f min | "
+                    "recusa fila com espera estimada > %.0f min | paciencia media %.0f min\n",
+                    s.cap_min, s.cap_max, s.dur_min, s.dur_max, o.cfg.balk_wait,
+                    o.cfg.patience_mean);
+        std::printf("Decisao: atratividade %.0f a %.0f | peso espera %.1f | peso caminhada %.1f | "
+                    "avalia %zu atracoes | cansaco +%.2f por passeio | repetir atracao: %s\n",
+                    o.cfg.attr_min, o.cfg.attr_max, o.cfg.w_wait, o.cfg.w_dist, o.cfg.consider,
+                    o.cfg.fatigue_per_ride, repeat_label(o.cfg.repeat_penalty).c_str());
         std::printf("Eventos: %llu | push %llu | cancel %llu | reschedule %llu | pico pendente %zu\n",
                     static_cast<unsigned long long>(s.events), static_cast<unsigned long long>(s.n_push),
                     static_cast<unsigned long long>(s.n_cancel), static_cast<unsigned long long>(s.n_resched),
                     s.peak_pending);
-        std::printf("Embarques %llu | desistencias %llu | recusaram %llu | quebras %llu | espera media %.1f min | maior fila %zu\n\n",
+        std::printf("Embarques %llu | desistencias %llu | recusaram %llu | descansos %llu | quebras %llu | espera media %.1f min | maior fila %zu\n",
                     static_cast<unsigned long long>(s.boarded), static_cast<unsigned long long>(s.giveups),
-                    static_cast<unsigned long long>(s.balks), static_cast<unsigned long long>(s.incidents),
-                    s.mean_wait, s.peak_line);
+                    static_cast<unsigned long long>(s.balks), static_cast<unsigned long long>(s.rests),
+                    static_cast<unsigned long long>(s.incidents), s.mean_wait, s.peak_line);
+        std::printf("Passeios por visitante: %.1f | mesma atracao em sequencia: %llu (%.1f%% dos passeios) | "
+                    "cansaco medio nas decisoes: %.2f\n\n",
+                    static_cast<double>(s.completed) / static_cast<double>(o.cfg.visitors),
+                    static_cast<unsigned long long>(s.repeats),
+                    s.completed ? 100.0 * static_cast<double>(s.repeats) / static_cast<double>(s.completed) : 0.0,
+                    s.mean_fatigue);
 
         std::printf("%-16s %12s %14s\n", "estrutura", "ns/evento", "tempo (ms)");
         for (const Row& r : rows)

@@ -17,7 +17,7 @@ parque. Etapas 1 a 6 prontas. Faltam a 7 (gráficos e análise) e a 8 (opcional)
 | 5 | `src/main.cpp` | Linha de comando: roda a grade de experimentos, confere checksums, imprime tabela e CSV. |
 | 6a | `src/park_sim.hpp` | Simulador de parque dirigido por eventos, em `template <class Q>`: o mesmo código roda com qualquer das três filas. |
 | 6b | `src/park_main.cpp` | CLI do parque: modo benchmark (compara as filas e confere que geraram a mesma história) e modo demo (mapa ASCII). |
-| 6c | `tests/test_park.cpp` | Testa o simulador: mesma história nas três filas, invariantes (um evento pendente por entidade) e cobertura de cancel/reschedule. |
+| 6c | `tests/test_park.cpp` | Testa o simulador: mesma história nas três filas, invariantes (um evento pendente por entidade), cobertura de cancel/reschedule e a regra de variedade (sem repetir a atração em sequência). |
 
 ## Como usar
 
@@ -44,17 +44,84 @@ tamanhos intermediários (20, 50, 200, 500) para enxergá-lo bem.
 ./park --visitors 30 --rides 4 --minutes 1200   # parque pequeno (n baixo)
 ./park --demo --visitors 1500 --minutes 120 --frame-every 10
 ./park --demo --delay-ms 400 --clear            # "animação" no terminal
+./park --capacity-range 20,60 --ride-range 2,10 --balk-wait 30
+./park --repeat-penalty 15                      # repetir a atração vira só "caro", não proibido
+./park --repeat-penalty 0                       # sem variedade (comportamento da versão anterior)
 ```
 
-Parâmetros úteis: `--rides` (1 a 26), `--capacity` (0 = automática),
-`--incident-mean` (minutos entre quebras; menor = mais reagendamentos),
-`--patience` (paciência média na fila), `--seed`, `--reps`.
+Parâmetros úteis:
+- `--rides` (1 a 26), `--seed`, `--reps`.
+- `--capacity-range MIN,MAX`: capacidade máxima de embarque, sorteada UMA vez por
+  atração e fixa depois. Sem a opção, é automática (0,5x a 1,5x de uma
+  capacidade-base calculada pelo número de visitantes). `--capacity N` dá o
+  mesmo valor N para todas.
+- `--ride-range MIN,MAX`: duração do passeio em minutos, sorteada uma vez por
+  atração (padrão 2,10). `--load-time` é o embarque entre partidas (padrão 1).
+- `--balk-wait`: acima dessa espera estimada (min) o visitante nem entra na fila
+  (padrão 30). `--patience`: paciência média de quem já está na fila (padrão 25).
+- `--incident-mean`: minutos entre quebras (menor = mais reagendamentos).
+- Decisão do visitante (ver a seção abaixo): `--attr-range`, `--w-wait`,
+  `--w-dist`, `--temperature`, `--consider`, `--fatigue-per-ride`,
+  `--fatigue-tau`, `--fatigue-sens`, `--rest-base`, `--rest-gain`,
+  `--rest-mean`, `--rest-tau`, `--repeat-penalty`.
 
 ## O simulador de parque
 
 Visitantes alternam: pensar, caminhar até uma atração, esperar na fila, passear.
-Cada atração parte a cada 2 min com até `capacity` visitantes. A fila tem
-paciência (desistência) e atrações quebram de vez em quando.
+Cada atração tem duração (2 a 10 min) e capacidade máxima próprias, sorteadas
+uma vez e fixas. Ela parte a cada (duração + embarque) min, levando até a sua
+capacidade. Há dois jeitos de não esperar na fila: **recusar** (a espera
+estimada, tamanho da fila / capacidade x intervalo entre partidas, passa de
+30 min e o visitante nem entra) e **desistir** (já na fila, perde a paciência).
+Atrações quebram de vez em quando.
+
+### Como o visitante decide
+
+A cada decisão, o visitante avalia K atrações sorteadas (`--consider`, padrão 6;
+0 = todas) mais a opção "descansar", e escolhe com probabilidade proporcional a
+`exp(U / temperatura)` (escolha logit). As utilidades são em "minutos
+equivalentes de espera":
+
+```
+U(atração)   = atratividade - m * ( w_wait * espera_estimada + w_dist * caminhada )
+                            - repeat_penalty   (só se for a última atração em que andou)
+U(descansar) = rest_base + rest_gain * cansaço
+m            = 1 + fatigue_sens * cansaço
+```
+
+| Variável | Efeito | Parâmetros |
+|---|---|---|
+| **Atratividade** (fixa por atração, sorteada uma vez) | quanto maior, mais escolhida | `--attr-range` |
+| **Espera estimada** (fila / capacidade x intervalo entre partidas) | quanto maior, menos atraente | `--w-wait` |
+| **Distância** (tempo de caminhada esperado até a atração) | quanto mais longe, menos atraente | `--w-dist` |
+| **Cansaço** (+0,25 por passeio, decai com o tempo) | torna o descanso mais atraente e o visitante menos tolerante a fila e caminhada (m maior) | `--fatigue-per-ride`, `--fatigue-tau`, `--fatigue-sens`, `--rest-gain` |
+| **Variedade** (última atração em que andou) | evita andar duas vezes seguidas na mesma; infinito (padrão) = nunca, valor finito = só prefere variar, 0 = desliga | `--repeat-penalty` |
+| **Descanso** | dura em média 8 min e derruba o cansaço rápido | `--rest-base`, `--rest-mean`, `--rest-tau` |
+| Aleatoriedade | menor temperatura = mais determinista | `--temperature` |
+
+Fora da escolha, o visitante ainda tem a **recusa** (espera estimada > `--balk-wait`)
+e a **paciência** na fila (`--patience`), que só afetam quem já decidiu ir.
+Não entram na decisão: atração quebrada, duração do passeio e capacidade (esta
+só indiretamente, pela espera estimada).
+
+Variedade: a penalidade vale só para a atração do **último passeio concluído** e não é
+multiplicada pelo cansaço. Recusar a fila ou desistir não conta como passeio (o visitante
+não andou, então pode tentar a mesma atração de novo). Descansar também não apaga a
+memória: andou na A, descansou, a próxima escolha ainda penaliza a A. Com uma única
+atração a regra não se aplica (não há alternativa). Com penalidade infinita o peso logit
+da atração repetida é exatamente 0, então a proibição não depende da `--temperature`.
+No modelo antigo ~12 a 13% dos passeios eram repetições imediatas; o `./park` imprime
+essa contagem (`mesma atracao em sequencia`), então dá para citar o antes/depois no
+relatório (`--repeat-penalty 0` x padrão). Em média, quem não pode repetir descansa um
+pouco mais (cerca de 6% mais descansos nos testes com 3000 visitantes).
+**As histórias mudam em relação às versões anteriores**: refaça os CSVs/medições do
+parque. Com `--repeat-penalty 0` a simulação é idêntica à da versão anterior (mesma
+semente, mesmo checksum).
+
+Calibração: `--rest-base -10` (padrão) faz o descanso vir de passeios
+consecutivos. Com `0`, visitantes descansam até pouco cansados, porque filas
+longas já tornam o descanso competitivo. Todos os pesos são suposições do modelo;
+documente-os no relatório e, se possível, varie-os.
 
 Como cada operação da fila de eventos aparece no parque:
 
@@ -74,8 +141,17 @@ Detalhes de implementação que valem uma frase no relatório:
   obsoleta; o `ticket` distingue a entrada atual de uma antiga do mesmo visitante.
 - **Mesma história**: o simulador é determinístico, então heap, array e lista
   geram exatamente a mesma simulação. O benchmark confere isso; só o tempo difere.
+- **A atração proibida ainda ocupa uma vaga na amostra** de K atrações avaliadas
+  (`--consider`): o sorteio é feito antes e a penalidade entra na utilidade. É a
+  mesma ideia de "o visitante lembrou dela, mas descartou".
 - **Capacidade automática** (~metade da demanda) para as filas saturarem e a
-  paciência, a desistência e o cancelamento acontecerem de verdade.
+  paciência, a desistência, a recusa e o cancelamento acontecerem de verdade.
+- **Parâmetros das atrações vêm da semente**: as três filas veem exatamente o
+  mesmo parque. Mas o resultado do parque (recusas, esperas) varia bastante
+  entre sementes, porque o sorteio de capacidade e duração muda quais atrações
+  são gargalo. Para o relatório, rode várias sementes (`--seed`).
+- **A decisão custa O(K) por escolha** (K = `--consider`). Esse custo é igual para
+  as três filas, mas dilui a parcela de tempo da fila no `ns/evento` total.
 
 ## Decisões de projeto (para justificar no relatório)
 
@@ -94,8 +170,8 @@ Detalhes de implementação que valem uma frase no relatório:
 - O parque não tem pathfinding: o tempo de caminhada é a distância de Manhattan
   no mapa. Para n baixo, o custo do próprio simulador (sorteios, tratadores)
   domina o tempo por evento, e as filas ficam parecidas. É um achado, não um bug.
-- Com a configuração padrão a regra de recusa de fila (`balk_wait`) quase nunca
-  dispara. Use menos capacidade (`--capacity`) ou mais visitantes se quiser vê-la.
+- O simulador mede o tempo por evento do conjunto (fila + lógica do parque). Para
+  isolar o custo da fila, compare com o benchmark do hold model.
 
 - `ns/hold` inclui o custo do laço (leitura da carga, checksum). É o mesmo para
   as três, mas não é zero; para n muito pequeno vale subtrair um laço vazio.
