@@ -1,10 +1,9 @@
 // heap_queue.hpp
-// ETAPA 2a - Heap binário INDEXADO (a estrutura "sofisticada" do estudo).
+// Heap binário INDEXADO (a estrutura "sofisticada" do estudo).
 //
 // Heap comum: push e pop_min em O(log n), mas cancelar um evento do meio
 // exige varrer o vetor (O(n)). Para um simulador com desistências e
-// reagendamentos isso seria um baseline injusto (ver o alerta sobre o
-// repositório de timing wheel). Solução: guardar em pos_[id] onde o evento
+// reagendamentos isso seria um baseline injusto. Solução: guardar em pos_[id] onde o evento
 // de cada visitante está no vetor. Assim cancel e reschedule viram O(log n).
 //
 // CONTRATO (igual nas três estruturas; o benchmark usa só isso):

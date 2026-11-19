@@ -1,5 +1,5 @@
 // test_park.cpp
-// ETAPA 6 (testes) - Correção do simulador de parque.
+// Correção do simulador de parque.
 //
 // O simulador tem muita lógica própria (filas com remoção preguiçosa, quebras,
 // cancelamentos), então ele também precisa de testes. Três verificações:
@@ -25,18 +25,11 @@
 #include <cstdlib>
 #include <limits>
 
+#include "check.hpp"
 #include "../src/heap_queue.hpp"
 #include "../src/park_sim.hpp"
 #include "../src/sorted_array_queue.hpp"
 #include "../src/sorted_list_queue.hpp"
-
-#define CHECK(cond)                                                              \
-    do {                                                                         \
-        if (!(cond)) {                                                           \
-            std::fprintf(stderr, "FALHOU %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-            std::exit(1);                                                        \
-        }                                                                        \
-    } while (0)
 
 template <class Q>
 pq::ParkStats run_and_check(const pq::ParkConfig& cfg) {
@@ -58,15 +51,6 @@ pq::ParkStats run_and_check(const pq::ParkConfig& cfg) {
     CHECK(sim.queue().check_invariant());       // a estrutura continua íntegra
     CHECK(st.events > 0);
     return st;
-}
-
-static bool same(const pq::ParkStats& a, const pq::ParkStats& b) {
-    return a.checksum == b.checksum && a.events == b.events && a.n_push == b.n_push &&
-           a.n_cancel == b.n_cancel && a.n_resched == b.n_resched && a.boarded == b.boarded &&
-           a.giveups == b.giveups && a.balks == b.balks && a.completed == b.completed &&
-           a.incidents == b.incidents && a.mean_wait == b.mean_wait && a.rests == b.rests &&
-           a.repeats == b.repeats && a.mean_fatigue == b.mean_fatigue &&
-           a.peak_pending == b.peak_pending && a.peak_line == b.peak_line;
 }
 
 static void test_ride_parameters() {
@@ -198,7 +182,7 @@ static void test_variety() {
             const pq::ParkStats h = run_and_check<pq::IndexedBinaryHeap>(c);
             const pq::ParkStats a = run_and_check<pq::SortedArrayQueue>(c);
             const pq::ParkStats l = run_and_check<pq::SortedLinkedListQueue>(c);
-            CHECK(same(h, a) && same(h, l));
+            CHECK(pq::same_history(h, a) && pq::same_history(h, l));
             CHECK(h.completed > c.visitors);   // houve passeios de sobra (não é vacuamente verdade)
             CHECK(h.repeats == 0);
         }
@@ -298,8 +282,8 @@ static void test_config(const char* label, const pq::ParkConfig& cfg, bool must_
     const pq::ParkStats h = run_and_check<pq::IndexedBinaryHeap>(cfg);
     const pq::ParkStats a = run_and_check<pq::SortedArrayQueue>(cfg);
     const pq::ParkStats l = run_and_check<pq::SortedLinkedListQueue>(cfg);
-    CHECK(same(h, a));
-    CHECK(same(h, l));
+    CHECK(pq::same_history(h, a));
+    CHECK(pq::same_history(h, l));
     if (must_exercise) {
         CHECK(h.n_cancel > 0);   // embarques cancelam o GiveUp
         CHECK(h.n_resched > 0);  // quebras reagendam

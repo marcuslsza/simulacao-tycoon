@@ -1,5 +1,5 @@
 // sorted_list_queue.hpp
-// ETAPA 2c - Lista ordenada ENCADEADA (o baseline clássico de Jones, 1986).
+// Lista ordenada ENCADEADA (o baseline clássico de Jones, 1986).
 //
 // Lista duplamente encadeada em ordem crescente: o mínimo está na cabeça, então
 // pop_min é O(1). Inserir exige VARRER a lista a partir da cabeça até achar a

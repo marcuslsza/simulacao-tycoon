@@ -1,5 +1,5 @@
 // event.hpp
-// ETAPA 1 - O "tijolo" comum: o que é um evento e como eles são ordenados.
+// O "tijolo" comum: o que é um evento e como eles são ordenados.
 //
 // Todas as estruturas (heap, array ordenado, lista ordenada) guardam o MESMO
 // tipo de evento e usam a MESMA regra de ordenação. Isso é o que torna a
@@ -11,7 +11,7 @@
 
 namespace pq {
 
-// Rótulos de evento do simulador de parque (etapa 6). No benchmark do hold
+// Rótulos de evento do simulador de parque. No benchmark do hold
 // model eles não importam; no simulador cada rótulo é um tipo de acontecimento:
 //   Choose   - o visitante decide a próxima atração
 //   Arrive   - o visitante termina de caminhar e chega à fila

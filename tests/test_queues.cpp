@@ -1,5 +1,5 @@
 // test_queues.cpp
-// ETAPA 3 - Testes de correção (rodar ANTES de qualquer benchmark).
+// Testes de correção (rodar ANTES de qualquer benchmark).
 //
 // Um benchmark de estrutura com bug mede lixo. Aqui cada estrutura é submetida
 // a milhares de operações aleatórias (push, pop_min, cancel, reschedule) e,
@@ -15,18 +15,11 @@
 #include <set>
 #include <vector>
 
+#include "check.hpp"
 #include "../src/event.hpp"
 #include "../src/heap_queue.hpp"
 #include "../src/sorted_array_queue.hpp"
 #include "../src/sorted_list_queue.hpp"
-
-#define CHECK(cond)                                                              \
-    do {                                                                         \
-        if (!(cond)) {                                                           \
-            std::fprintf(stderr, "FALHOU %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-            std::exit(1);                                                        \
-        }                                                                        \
-    } while (0)
 
 struct Cmp {
     bool operator()(const pq::Event& a, const pq::Event& b) const { return pq::before(a, b); }

@@ -1,48 +1,35 @@
 // park_sim.hpp
-// ETAPA 6 - Simulador de parque dirigido por eventos (discrete-event simulation).
-//
-// A mesma fila de eventos do benchmark agora é usada "de verdade": o simulador
-// é um template sobre Q, então o MESMO código de parque roda com heap, array
-// ordenado ou lista. Como a simulação é determinística, as três estruturas
-// produzem exatamente a mesma história (mesmo checksum); só o tempo muda.
+// Simulador de parque dirigido por eventos, em template sobre a fila Q: o MESMO
+// código roda com heap, array ordenado ou lista. A simulação é determinística,
+// então as três filas produzem exatamente a mesma história (mesmo checksum);
+// só o tempo muda.
 //
 // MODELO
-//   * Visitantes alternam: pensar -> caminhar até uma atração -> esperar na
-//     fila -> passear -> pensar ...
-//   * Cada atração tem DURAÇÃO (2 a 10 min) e CAPACIDADE máxima próprias,
-//     sorteadas uma única vez no início e fixas durante a simulação (uma
-//     montanha-russa é rápida e pequena; uma roda-gigante é lenta e grande).
-//     Ela parte a cada (duração + tempo de embarque) minutos, levando até
-//     'capacidade' visitantes da frente da fila.
-//   * DECISÃO DO VISITANTE (modelo de escolha por utilidade, ver on_choose):
-//       U(atração) = atratividade - m * ( w_wait * espera_estimada
-//                                       + w_dist * tempo_de_caminhada )
-//                      - repeat_penalty   (só na atração em que acabou de andar)
-//       U(descansar) = rest_base + rest_gain * cansaço
-//     O termo de VARIEDADE faz o visitante evitar andar duas vezes seguidas na
-//     mesma atração (padrão: proibido; ver ParkConfig::repeat_penalty).
-//     O visitante avalia K atrações sorteadas, mais a opção "descansar", e
-//     escolhe por sorteio proporcional a exp(U / temperatura) (logit). O
-//     cansaço sobe a cada passeio e decai com o tempo; ele (a) torna o
-//     descanso mais atraente e (b) aumenta m = 1 + fatigue_sens * cansaço,
-//     isto é, o visitante cansado tolera menos fila e menos caminhada.
-//   * A fila tem paciência: se o tempo de espera passa da paciência do
-//     visitante, ele desiste. E quem chega e vê uma fila com espera estimada
-//     acima de 'balk_wait' (30 min) nem entra: recusa a fila.
+//   * Visitantes alternam: pensar -> caminhar até uma atração -> esperar na fila
+//     -> passear -> pensar (ou descansar).
+//   * Cada atração tem duração (2 a 10 min) e capacidade próprias, sorteadas uma
+//     vez (pela semente) e fixas. Ela parte a cada (duração + embarque) minutos,
+//     levando até 'capacidade' visitantes da frente da fila.
+//   * Decisão (ver choose_action): o visitante avalia K atrações sorteadas mais a
+//     opção "descansar" e escolhe por regra logit, P ~ exp(U / temperatura):
+//       U(atração)   = atratividade - m * (w_wait * espera_estimada + w_dist * caminhada)
+//                      - repeat_penalty   (só na última atração em que andou)
+//       U(descansar) = rest_base + rest_gain * cansaço,   m = 1 + fatigue_sens * cansaço
+//   * Quem chega e vê espera estimada > balk_wait não entra na fila (recusa);
+//     quem já está nela desiste se perde a paciência (exponencial).
 //   * De vez em quando uma atração QUEBRA (Incident): quem está dentro demora
 //     mais para sair, a próxima partida atrasa e a fila perde paciência.
 //
-// COMO CADA OPERAÇÃO DA FILA DE EVENTOS APARECE NO PARQUE
-//   push        - todo novo acontecimento agendado (caminhar, esperar, passear...)
-//   pop_min     - o laço principal: próximo evento no tempo
-//   cancel      - visitante embarca: seu "perder a paciência" deixa de existir
-//   reschedule  - quebra de atração: EndRide e Dispatch ADIAM (chave aumenta) e
-//                 GiveUp de quem está na fila ENCURTA (chave diminui), em rajada
+// OPERAÇÕES DA FILA DE EVENTOS NO PARQUE
+//   push        - todo novo acontecimento agendado
+//   pop_min     - o laço principal
+//   cancel      - o visitante embarca: o GiveUp dele deixa de existir
+//   reschedule  - quebra: EndRide e Dispatch ADIAM (chave aumenta); o GiveUp de
+//                 quem está na fila ENCURTA (chave diminui), em rajada
 //
-// INVARIANTE (a mesma da etapa 1): cada entidade tem exatamente UM evento
-// pendente, e o estado da entidade diz de que tipo ele é:
-//   Idle=Choose, Walking=Arrive, Queued=GiveUp, Riding=EndRide
-//   atração=Dispatch, gerador de incidentes=Incident
+// INVARIANTE: cada entidade tem exatamente UM evento pendente, e o estado dela
+// diz o tipo dele: Idle=Choose, Walking=Arrive, Queued=GiveUp, Riding=EndRide,
+// atração=Dispatch, gerador de incidentes=Incident.
 // Ids: visitantes 0..V-1, atrações V..V+R-1, gerador de incidentes V+R.
 #pragma once
 
@@ -64,45 +51,35 @@ struct ParkConfig {
     std::size_t rides = 12;      // 1..26 (cada uma vira uma letra no mapa)
     double minutes = 240.0;      // duração simulada
     std::uint64_t seed = 42;
-    // Capacidade máxima de embarque: cada atração recebe um valor inteiro
-    // sorteado em [capacity_min, capacity_max] e FIXO daí em diante.
-    // 0,0 = automático (faixa de 0.5x a 1.5x de uma capacidade-base, ver abaixo).
-    // Use min == max para todas as atrações iguais.
+    // Capacidade de embarque: inteiro sorteado por atração em [capacity_min, capacity_max]
+    // e fixo depois. 0,0 = automático (0,5x a 1,5x de uma capacidade-base). min == max = iguais.
     std::size_t capacity_min = 0, capacity_max = 0;
-    // Duração do passeio: cada atração recebe um valor sorteado em
-    // [ride_min, ride_max] minutos e FIXO daí em diante.
+    // Duração do passeio: sorteada por atração em [ride_min, ride_max] minutos e fixa depois.
     double ride_min = 2.0, ride_max = 10.0;
-    double load_time = 1.0;      // embarque/desembarque entre duas partidas (min)
-    double patience_mean = 25.0; // paciência média na fila (exponencial)
-    double think_mean = 3.0;     // pausa entre atrações
-    double incident_mean = 12.0; // intervalo médio entre quebras no parque todo
-    double repair_mean = 8.0;    // atraso médio causado por uma quebra
-    double balk_wait = 30.0;     // não entra na fila se a espera estimada passar disso (min)
+    double load_time = 1.0;       // embarque/desembarque entre duas partidas (min)
+    double patience_mean = 25.0;  // paciência média na fila (exponencial)
+    double think_mean = 3.0;      // pausa entre atrações
+    double incident_mean = 12.0;  // intervalo médio entre quebras no parque todo
+    double repair_mean = 8.0;     // atraso médio causado por uma quebra
+    double balk_wait = 30.0;      // não entra na fila se a espera estimada passar disso (min)
 
     // ---- decisão do visitante (utilidades em "minutos equivalentes de espera") ----
-    // Atratividade: valor FIXO por atração, sorteado uma vez em [attr_min, attr_max]
-    // = quantos minutos de fila o visitante toleraria para andar nela.
-    double attr_min = 10.0, attr_max = 40.0;
-    double w_wait = 1.0;         // peso da espera estimada na fila
-    double w_dist = 3.0;         // peso do tempo de caminhada (1 min andando "custa" 3 min de fila)
-    double temperature = 5.0;    // aleatoriedade da escolha: menor = mais determinista
-    std::size_t consider = 6;    // quantas atrações cada visitante avalia por decisão (0 = todas)
-    // Cansaço: sobe fatigue_per_ride a cada passeio e decai com constante de tempo
-    // fatigue_tau (min). Descansar derruba o cansaço rapidamente (rest_tau).
+    double attr_min = 10.0, attr_max = 40.0;  // atratividade fixa por atração, sorteada em [min, max]
+    double w_wait = 1.0;          // peso da espera estimada na fila
+    double w_dist = 3.0;          // peso do tempo de caminhada (1 min andando "custa" 3 min de fila)
+    double temperature = 5.0;     // aleatoriedade da escolha: menor = mais determinista
+    std::size_t consider = 6;     // atrações avaliadas por decisão (K; 0 = todas)
+    // Cansaço: sobe fatigue_per_ride a cada passeio e decai com constante fatigue_tau (min).
     double fatigue_per_ride = 0.25;
     double fatigue_tau = 45.0;
-    double fatigue_sens = 1.0;   // quanto o cansaço amplifica o peso de espera e caminhada
-    double rest_base = -10.0;    // utilidade de descansar quando descansado (-1000 desliga o descanso)
-    double rest_gain = 40.0;     // quanto cada unidade de cansaço aumenta essa utilidade
-    double rest_mean = 8.0;      // duração média de um descanso (min)
-    double rest_tau = 6.0;       // recuperação durante o descanso (min)
-    // Variedade: penalidade (em minutos equivalentes de espera) descontada da utilidade
-    // da atração em que o visitante ACABOU de andar (o último passeio concluído; recusas
-    // e desistências não contam, pois não houve passeio). Não é multiplicada pelo cansaço.
-    //   infinito (padrão) = nunca anda duas vezes seguidas na mesma atração
-    //   0                 = desliga (comportamento da versão anterior)
-    //   valor finito      = só PREFERE variar (ex.: 15 = repetir "custa" 15 min de fila)
-    // Sem efeito com 1 única atração (não há alternativa).
+    double fatigue_sens = 1.0;    // quanto o cansaço amplifica o peso de espera e caminhada
+    double rest_base = -10.0;     // utilidade de descansar quando descansado (-1000 desliga o descanso)
+    double rest_gain = 40.0;      // quanto cada unidade de cansaço aumenta essa utilidade
+    double rest_mean = 8.0;       // duração média de um descanso (min)
+    double rest_tau = 6.0;        // recuperação durante o descanso (min)
+    // Variedade: penalidade (em minutos de espera) descontada da atração do ÚLTIMO PASSEIO
+    // concluído (recusas e desistências não contam). inf (padrão) = nunca repete em sequência;
+    // 0 = desliga; valor finito = só prefere variar. Sem efeito com uma única atração.
     double repeat_penalty = std::numeric_limits<double>::infinity();
 };
 
@@ -124,38 +101,44 @@ struct ParkStats {
     double dur_min = 0, dur_max = 0;
 };
 
+// As duas execuções contaram exatamente a mesma história? (usado para conferir as três filas)
+inline bool same_history(const ParkStats& a, const ParkStats& b) {
+    return a.checksum == b.checksum && a.events == b.events && a.n_push == b.n_push &&
+           a.n_cancel == b.n_cancel && a.n_resched == b.n_resched && a.boarded == b.boarded &&
+           a.giveups == b.giveups && a.balks == b.balks && a.completed == b.completed &&
+           a.incidents == b.incidents && a.mean_wait == b.mean_wait && a.rests == b.rests &&
+           a.repeats == b.repeats && a.mean_fatigue == b.mean_fatigue &&
+           a.peak_pending == b.peak_pending && a.peak_line == b.peak_line;
+}
+
 template <class Q>
 class ParkSim {
 public:
-    static constexpr int kW = 48, kH = 14;  // dimensões do mapa (só para distância e desenho)
-
     explicit ParkSim(const ParkConfig& c)
         : c_(c), V_(c.visitors), R_(c.rides), q_(c.visitors + c.rides + 1), rng_(c.seed) {
-        if (V_ < 1) throw std::invalid_argument("visitors deve ser >= 1");
-        if (R_ < 1 || R_ > 26) throw std::invalid_argument("rides deve estar entre 1 e 26");
-        if (c.ride_min <= 0.0 || c.ride_max < c.ride_min)
-            throw std::invalid_argument("duracao do passeio: use 0 < ride_min <= ride_max");
-        if (c.load_time < 0.0) throw std::invalid_argument("load_time deve ser >= 0");
-        if (c.attr_max < c.attr_min) throw std::invalid_argument("attr_max deve ser >= attr_min");
-        if (c.temperature <= 0.0) throw std::invalid_argument("temperature deve ser > 0");
-        if (c.fatigue_tau <= 0.0 || c.rest_tau <= 0.0 || c.rest_mean <= 0.0)
-            throw std::invalid_argument("fatigue_tau, rest_tau e rest_mean devem ser > 0");
-        if (c.capacity_min > c.capacity_max)
-            throw std::invalid_argument("capacity_min deve ser <= capacity_max");
-        if (!(c.repeat_penalty >= 0.0))  // também rejeita NaN; infinito é permitido
-            throw std::invalid_argument("repeat_penalty deve ser >= 0 (inf = proibido repetir)");
+        reject(V_ < 1, "visitors deve ser >= 1");
+        reject(R_ < 1 || R_ > 26, "rides deve estar entre 1 e 26");
+        reject(c.ride_min <= 0.0 || c.ride_max < c.ride_min, "duracao do passeio: use 0 < ride_min <= ride_max");
+        reject(c.load_time < 0.0, "load_time deve ser >= 0");
+        reject(c.attr_max < c.attr_min, "attr_max deve ser >= attr_min");
+        reject(c.temperature <= 0.0, "temperature deve ser > 0");
+        reject(c.fatigue_tau <= 0.0 || c.rest_tau <= 0.0 || c.rest_mean <= 0.0,
+               "fatigue_tau, rest_tau e rest_mean devem ser > 0");
+        reject(c.capacity_min > c.capacity_max, "capacity_min deve ser <= capacity_max");
+        reject(!(c.repeat_penalty >= 0.0),  // também rejeita NaN; infinito é permitido
+               "repeat_penalty deve ser >= 0 (inf = proibido repetir)");
 
+        s_.checksum = 1469598103934665603ull;  // FNV-1a
         st_.assign(V_, VisitorState::Idle);
         target_.assign(V_, 0);
         ticket_.assign(V_, 0);
         join_time_.assign(V_, 0.0);
-        loc_.assign(V_, static_cast<std::uint32_t>(R_));  // todos começam na entrada
+        loc_.assign(V_, static_cast<std::uint32_t>(R_));        // todos começam na entrada
         last_ride_.assign(V_, static_cast<std::uint32_t>(R_));  // R = ainda não andou em nada
         line_.assign(R_, {});
         qlen_.assign(R_, 0);
         riding_.assign(R_, 0);
         aboard_.assign(R_, {});
-        broken_until_.assign(R_, 0.0);
         evt_time_.assign(V_ + R_ + 1, 0.0);
         fat_.assign(V_, 0.0);
         fat_t_.assign(V_, 0.0);
@@ -174,23 +157,18 @@ public:
         schedule(incident_id(), EventType::Incident, expo(c_.incident_mean));
     }
 
-    // Executa até o fim do horizonte. 'frame' (opcional) é chamado a cada
-    // 'frame_every' minutos simulados para desenhar o parque; com
-    // frame_every == 0 nada é desenhado e o laço fica "limpo" para medir.
-    template <class Frame>
-    ParkStats run(double frame_every, Frame&& frame) {
-        const double until = c_.minutes;
-        double next_frame = 0.0;
+    // Executa até o fim do horizonte.
+    ParkStats run() {
         Event e{};
         while (q_.pop_min(e)) {
-            if (e.time > until) {  // passou do horizonte: devolve o evento e para
-                q_.push(e);        // (mantém o estado final consistente: 1 evento por entidade)
+            if (e.time > c_.minutes) {  // passou do horizonte: devolve o evento e para
+                q_.push(e);             // (mantém o estado final consistente: 1 evento por entidade)
                 break;
             }
             now_ = e.time;
-            ++events_;
-            checksum_ = (checksum_ ^ ((static_cast<std::uint64_t>(e.id) << 3) |
-                                      static_cast<std::uint64_t>(e.type))) * 1099511628211ull;
+            ++s_.events;
+            s_.checksum = (s_.checksum ^ ((static_cast<std::uint64_t>(e.id) << 3) |
+                                          static_cast<std::uint64_t>(e.type))) * 1099511628211ull;
             switch (e.type) {
                 case EventType::Choose:   on_choose(e.id); break;
                 case EventType::Arrive:   on_arrive(e.id); break;
@@ -199,23 +177,23 @@ public:
                 case EventType::EndRide:  on_end_ride(e.id); break;
                 case EventType::Incident: on_incident(); break;
             }
-            peak_pending_ = std::max(peak_pending_, q_.size() + 1);  // +1: o evento atual já saiu
-            if (frame_every > 0.0 && now_ >= next_frame) {
-                frame(*this);
-                next_frame += frame_every;
-            }
+            // Depois do tratador a fila já tem de novo V+R+1 eventos; o "+1" faz o pico valer V+R+2.
+            s_.peak_pending = std::max(s_.peak_pending, q_.size() + 1);
         }
         return stats();
     }
-    ParkStats run() { return run(0.0, [](const ParkSim&) {}); }
 
-    // ---- consultas (usadas pelo desenho do mapa e pelos testes) ----
+    // ---- consultas (usadas pelos testes) ----
     const Q& queue() const { return q_; }
-    const ParkConfig& config() const { return c_; }
-    double now() const { return now_; }
+    std::size_t pending() const { return q_.size(); }
     std::size_t capacity(std::size_t r) const { return cap_[r]; }       // lugares por partida
     double ride_duration(std::size_t r) const { return dur_[r]; }       // minutos de passeio
     double attractiveness(std::size_t r) const { return attr_[r]; }
+    std::size_t line_length(std::size_t r) const { return qlen_[r]; }
+    std::size_t riding(std::size_t r) const { return riding_[r]; }
+    int ride_x(std::size_t r) const { return rx_[r]; }                  // posição no mapa (r = R: entrada)
+    int ride_y(std::size_t r) const { return ry_[r]; }
+    int entrance_y() const { return ry_[R_]; }
     // Cansaço do visitante v neste instante (já com a recuperação natural aplicada).
     double fatigue(std::uint32_t v) const { return fatigue_now(v); }
     // Última atração em que o visitante v andou (R = ainda não andou em nenhuma).
@@ -224,28 +202,14 @@ public:
     double utility(std::uint32_t v, std::size_t r) const {
         return utility_of(v, r, 1.0 + c_.fatigue_sens * fatigue_now(v));
     }
-    std::size_t pending() const { return q_.size(); }
-    std::size_t line_length(std::size_t r) const { return qlen_[r]; }
-    std::size_t riding(std::size_t r) const { return riding_[r]; }
-    bool broken(std::size_t r) const { return now_ < broken_until_[r]; }
-    double repair_left(std::size_t r) const { return std::max(0.0, broken_until_[r] - now_); }
-    int ride_x(std::size_t r) const { return rx_[r]; }
-    int ride_y(std::size_t r) const { return ry_[r]; }
-    int entrance_y() const { return ry_[R_]; }
     std::size_t count_state(VisitorState s) const {
         return static_cast<std::size_t>(std::count(st_.begin(), st_.end(), s));
     }
 
     ParkStats stats() const {
-        ParkStats s;
-        s.events = events_;
-        s.n_push = n_push_; s.n_cancel = n_cancel_; s.n_resched = n_resched_;
-        s.boarded = boarded_; s.completed = completed_; s.giveups = giveups_;
-        s.balks = balks_; s.incidents = incidents_; s.rests = rests_; s.repeats = repeats_;
+        ParkStats s = s_;
         s.mean_fatigue = choices_ ? fatigue_sum_ / static_cast<double>(choices_) : 0.0;
-        s.mean_wait = boarded_ ? wait_sum_ / static_cast<double>(boarded_) : 0.0;
-        s.peak_pending = peak_pending_; s.peak_line = peak_line_;
-        s.checksum = checksum_;
+        s.mean_wait = s_.boarded ? wait_sum_ / static_cast<double>(s_.boarded) : 0.0;
         s.cap_min = *std::min_element(cap_.begin(), cap_.end());
         s.cap_max = *std::max_element(cap_.begin(), cap_.end());
         s.dur_min = *std::min_element(dur_.begin(), dur_.end());
@@ -256,10 +220,13 @@ public:
 private:
     struct Entry { std::uint32_t v; std::uint64_t ticket; };
 
+    static constexpr int kW = 48, kH = 14;  // dimensões do mapa (só para as distâncias)
+
     ParkConfig c_;
     std::size_t V_, R_;
     Q q_;
     std::mt19937_64 rng_;
+    ParkStats s_;  // contadores e extremos; médias e faixas são calculadas em stats()
 
     // estado dos visitantes
     std::vector<VisitorState> st_;
@@ -278,10 +245,9 @@ private:
     std::vector<std::size_t> qlen_;        // tamanho REAL da fila (sem entradas obsoletas)
     std::vector<std::size_t> riding_;
     std::vector<std::vector<std::uint32_t>> aboard_;
-    std::vector<double> broken_until_;
     // agenda: instante do evento pendente de cada entidade (a fila não expõe isso)
     std::vector<double> evt_time_;
-    // mapa
+    // mapa (atrações em grade; a entrada fica à esquerda)
     std::vector<int> rx_, ry_;
     // cansaço de cada visitante: valor em fat_t_ (instante da última atualização)
     std::vector<double> fat_, fat_t_;
@@ -290,13 +256,10 @@ private:
     std::vector<double> util_;
 
     double now_ = 0.0;
-    std::uint64_t seq_ = 0, ticket_counter_ = 0, checksum_ = 1469598103934665603ull;
-    std::uint64_t events_ = 0, n_push_ = 0, n_cancel_ = 0, n_resched_ = 0;
-    std::uint64_t boarded_ = 0, completed_ = 0, giveups_ = 0, balks_ = 0, incidents_ = 0;
-    std::uint64_t rests_ = 0, choices_ = 0, repeats_ = 0;
-    double fatigue_sum_ = 0.0;
-    double wait_sum_ = 0.0;
-    std::size_t peak_pending_ = 0, peak_line_ = 0;
+    std::uint64_t seq_ = 0, ticket_counter_ = 0, choices_ = 0;
+    double fatigue_sum_ = 0.0, wait_sum_ = 0.0;
+
+    static void reject(bool bad, const char* msg) { if (bad) throw std::invalid_argument(msg); }
 
     std::uint32_t ride_id(std::size_t r) const { return static_cast<std::uint32_t>(V_ + r); }
     std::uint32_t incident_id() const { return static_cast<std::uint32_t>(V_ + R_); }
@@ -309,19 +272,18 @@ private:
     void schedule(std::uint32_t id, EventType type, double t) {
         q_.push(Event{t, seq_++, id, type});
         evt_time_[id] = t;
-        ++n_push_;
+        ++s_.n_push;
     }
     void cancel_event(std::uint32_t id) {
         if (!q_.cancel(id)) throw std::logic_error("cancel de evento inexistente (invariante quebrado)");
-        ++n_cancel_;
+        ++s_.n_cancel;
     }
     void reschedule_event(std::uint32_t id, double t) {
         if (!q_.reschedule(id, t, seq_++)) throw std::logic_error("reschedule de evento inexistente");
         evt_time_[id] = t;
-        ++n_resched_;
+        ++s_.n_resched;
     }
 
-    // ---- mapa: atrações em grade; a entrada fica à esquerda ----
     void layout() {
         rx_.assign(R_ + 1, 0);
         ry_.assign(R_ + 1, 0);
@@ -335,7 +297,7 @@ private:
         rx_[R_] = 0;
         ry_[R_] = kH / 2;  // entrada
     }
-    // Sorteia UMA vez a duração e a capacidade de cada atração (determinístico
+    // Sorteia UMA vez a duração, a capacidade e a atratividade de cada atração (determinístico
     // pela semente; roda antes dos eventos iniciais, então é igual em todas as filas).
     void draw_ride_parameters() {
         std::size_t cmin = c_.capacity_min, cmax = c_.capacity_max;
@@ -432,7 +394,7 @@ private:
         ++choices_;
         const std::size_t a = choose_action(v, f);
         if (a == R_) {  // decidiu descansar: continua Idle e decide de novo ao terminar
-            ++rests_;
+            ++s_.rests;
             const double len = expo(c_.rest_mean);
             fat_[v] = f * std::exp(-len / c_.rest_tau);  // descansar recupera rápido
             fat_t_[v] = now_ + len;
@@ -448,7 +410,7 @@ private:
         const std::uint32_t r = target_[v];
         loc_[v] = r;
         if (est_wait(r) > c_.balk_wait) {  // espera estimada longa demais: nem entra
-            ++balks_;
+            ++s_.balks;
             st_[v] = VisitorState::Idle;
             schedule(v, EventType::Choose, now_ + expo(c_.think_mean));
             return;
@@ -456,7 +418,7 @@ private:
         ticket_[v] = ++ticket_counter_;
         line_[r].push_back({v, ticket_[v]});
         ++qlen_[r];
-        peak_line_ = std::max(peak_line_, qlen_[r]);
+        s_.peak_line = std::max(s_.peak_line, qlen_[r]);
         st_[v] = VisitorState::Queued;
         join_time_[v] = now_;
         schedule(v, EventType::GiveUp, now_ + expo(c_.patience_mean));
@@ -464,7 +426,7 @@ private:
 
     void on_giveup(std::uint32_t v) {
         --qlen_[target_[v]];  // a entrada na deque fica obsoleta e é descartada depois
-        ++giveups_;
+        ++s_.giveups;
         st_[v] = VisitorState::Idle;
         schedule(v, EventType::Choose, now_ + expo(0.5 * c_.think_mean));
     }
@@ -484,7 +446,7 @@ private:
             cancel_event(en.v);  // o GiveUp deste visitante deixa de existir
             --qlen_[r];
             wait_sum_ += now_ - join_time_[en.v];
-            ++boarded_;
+            ++s_.boarded;
             st_[en.v] = VisitorState::Riding;
             aboard_[r].push_back(en.v);
             schedule(en.v, EventType::EndRide, now_ + dur_[r]);
@@ -497,9 +459,9 @@ private:
     void on_end_ride(std::uint32_t v) {
         const std::uint32_t r = target_[v];
         if (riding_[r] > 0) --riding_[r];
-        ++completed_;
-        if (last_ride_[v] == r) ++repeats_;  // mesma atração do passeio anterior (só ocorre se permitido)
-        last_ride_[v] = r;                   // lembra para a próxima decisão
+        ++s_.completed;
+        if (last_ride_[v] == r) ++s_.repeats;  // mesma atração do passeio anterior (só ocorre se permitido)
+        last_ride_[v] = r;                     // lembra para a próxima decisão
         fat_[v] = fatigue_now(v) + c_.fatigue_per_ride;  // cada passeio cansa
         fat_t_[v] = now_;
         st_[v] = VisitorState::Idle;
@@ -508,10 +470,9 @@ private:
 
     // A quebra é a fonte das rajadas de reschedule.
     void on_incident() {
-        ++incidents_;
+        ++s_.incidents;
         const std::size_t r = static_cast<std::size_t>(rng_() % R_);
         const double delay = expo(c_.repair_mean);
-        broken_until_[r] = std::max(broken_until_[r], now_ + delay);
 
         // 1) quem está dentro demora mais para sair (chave AUMENTA)
         for (std::uint32_t v : aboard_[r])

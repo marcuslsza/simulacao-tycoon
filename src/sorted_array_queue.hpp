@@ -1,5 +1,5 @@
 // sorted_array_queue.hpp
-// ETAPA 2b - Lista ordenada em ARRAY (candidata forte em n pequeno).
+// Lista ordenada em ARRAY (candidata forte em n pequeno).
 //
 // Ideia: manter os eventos num std::vector ordenado do MAIOR para o MENOR
 // tempo. O próximo evento (o menor) fica no FIM do vetor, então pop_min é

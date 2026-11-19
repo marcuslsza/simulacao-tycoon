@@ -1,5 +1,5 @@
 // hold_bench.hpp
-// ETAPA 4 - O harness do modelo HOLD (Jones, 1986), com reagendamentos.
+// O harness do modelo HOLD (Jones, 1986), com reagendamentos.
 //
 // Modelo hold: mantém-se uma fila com n eventos e repete-se
 //     pop_min  ->  push(mesmo visitante, tempo_atual + incremento aleatório)
